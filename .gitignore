@@ -1,0 +1,50 @@
+# ── Environment (CRITICAL — never commit secrets) ─────────────────────────────
+.env
+
+# ── ML Models (too large for git, ~256MB) ─────────────────────────────────────
+models/*.onnx
+models/*.onnx.data
+models/*.bin
+models/*.pt
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+venv/
+env/
+ENV/
+.venv/
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Databases (local logs) ───────────────────────────────────────────────────
+*.db
+*.db-journal
+*.sqlite3
+
+# ── OS artifacts ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+.dockerignore
+
+# ── Coverage / Testing ───────────────────────────────────────────────────────
+htmlcov/
+.coverage
+.pytest_cache/
+.tox/

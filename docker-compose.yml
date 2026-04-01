@@ -1,0 +1,42 @@
+version: "3.9"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Foretyx Data Plane — Docker Compose
+# ═══════════════════════════════════════════════════════════════════════════════
+# Usage:  docker compose up
+# This starts the Foretyx gateway + Ollama for Phase 2 escalation.
+
+services:
+  foretyx-gateway:
+    build: .
+    container_name: foretyx-gateway
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./models:/app/models:ro
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - foretyx-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: foretyx-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - foretyx-net
+
+volumes:
+  ollama-data:
+
+networks:
+  foretyx-net:
+    driver: bridge
