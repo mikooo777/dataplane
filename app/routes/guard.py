@@ -8,6 +8,11 @@ Returns GuardResult so the bridge can decide whether to forward to the LLM.
 from fastapi import APIRouter, Request
 
 from app.contracts.api import GuardRequest, GuardResponse
+from app.security import SecurityValidator
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["guard"])
 
@@ -19,6 +24,13 @@ async def guard_endpoint(req: GuardRequest, request: Request):
     Does NOT call the LLM — returns the guard verdict only.
     Use this when the bridge layer handles the LLM call separately.
     """
+    # Validate input
+    try:
+        SecurityValidator.validate_prompt_length(req.prompt, request.app.state.settings.max_prompt_length)
+    except Exception as e:
+        logger.warning("invalid_prompt_input", error=str(e))
+        raise
+    
     pipeline = request.app.state.pipeline
 
     result = await pipeline.guard(req.prompt)

@@ -7,7 +7,7 @@ No hardcoded secrets — ever.
 """
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, SecretStr
 from typing import List
 
 
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     """
 
     # ── LLM API ───────────────────────────────────────────────────────────────
-    gemini_api_key: str = Field(
+    gemini_api_key: SecretStr = Field(
         ..., description="Google Gemini API key"
     )
     default_llm_model: str = Field(
@@ -46,8 +46,22 @@ class Settings(BaseSettings):
     control_plane_url: str = Field(
         "http://localhost:8000", description="Control Plane URL for event relay"
     )
-    bridge_token: str = Field(
+    bridge_token: SecretStr = Field(
         "", description="Bearer token for Control Plane authentication"
+    )
+
+    # ── Security / Authentication ──────────────────────────────────────────────
+    admin_api_key: SecretStr = Field(
+        ..., description="Admin API key for protected endpoints (e.g., /logs, /metrics)"
+    )
+    require_https: bool = Field(
+        False, description="Require HTTPS in production (set via env var)"
+    )
+    cors_allow_credentials: bool = Field(
+        False, description="Allow credentials in CORS (should be False for public APIs)"
+    )
+    trusted_proxies: str = Field(
+        "127.0.0.1", description="Comma-separated list of trusted proxy IPs"
     )
 
     # ── ML Guard thresholds ───────────────────────────────────────────────────
@@ -111,6 +125,10 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def trusted_proxies_list(self) -> List[str]:
+        return [p.strip() for p in self.trusted_proxies.split(",") if p.strip()]
 
     model_config = {
         "env_file": ".env",

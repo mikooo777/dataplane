@@ -43,9 +43,9 @@ class ProcessRequest(BaseModel):
     """POST /v1/process — full end-to-end: guard → LLM → rehydrate → response scan."""
     prompt:          str
     model_requested: str = "gemini-2.0-flash"
-    org_id:          str = "org_dev"
-    user_id:         str = "usr_dev"
-    session_id:      str = "session_dev"
+    org_id:          str
+    user_id:         str
+    session_id:      str = ""
 
 
 class ProcessResponse(BaseModel):

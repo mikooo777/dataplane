@@ -46,7 +46,7 @@ class EventEmitter:
 
     def __init__(self, settings: Settings):
         self._control_plane_url = settings.control_plane_url
-        self._bridge_token = settings.bridge_token
+        self._bridge_token = settings.bridge_token.get_secret_value()
         self._flush_task: Optional[asyncio.Task] = None
         self._device_info = DeviceInfo()
         self._init_db()

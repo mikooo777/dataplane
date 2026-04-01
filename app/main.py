@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import Settings
 from app.dependencies import get_settings
@@ -32,6 +33,7 @@ from app.engine.event_emitter import EventEmitter
 from app.middleware.request_id import RequestIDMiddleware
 from app.middleware.rate_limiter import RateLimiterMiddleware
 from app.middleware.access_log import AccessLogMiddleware
+from app.security import get_secure_headers
 from app.routes import guard, process, health, admin
 
 
@@ -60,6 +62,19 @@ def configure_logging(settings: Settings):
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+
+# ── Security Headers Middleware ──────────────────────────────────────────────
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+    
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        # Add security headers
+        for header_name, header_value in get_secure_headers().items():
+            response.headers[header_name] = header_value
+        return response
 
 
 # ── Application Lifespan ─────────────────────────────────────────────────────
@@ -107,7 +122,7 @@ async def lifespan(app: FastAPI):
         "foretyx_data_plane_ready",
         host=settings.host,
         port=settings.port,
-        endpoints=["/v1/guard", "/v1/process", "/v1/health", "/v1/logs", "/v1/metrics", "/v1/rehydrate"],
+        require_https=settings.require_https,
     )
 
     yield
@@ -132,6 +147,7 @@ app = FastAPI(
 # Note: Middleware executes in reverse order of addition
 settings = get_settings()
 
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(AccessLogMiddleware)
 app.add_middleware(
     RateLimiterMiddleware,
@@ -142,9 +158,10 @@ app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    max_age=3600,
 )
 
 # ── Route Registration ───────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ class LLMRouter:
     """
 
     def __init__(self, settings: Settings):
-        genai.configure(api_key=settings.gemini_api_key)
+        genai.configure(api_key=settings.gemini_api_key.get_secret_value())
         self._default_model = settings.default_llm_model
         self._timeout = settings.llm_timeout_seconds
         self._max_retries = settings.llm_max_retries

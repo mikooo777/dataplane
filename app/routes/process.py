@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 
 from app.contracts.api import ProcessRequest, ProcessResponse
 from app.contracts.enums import BlockReason, EventType
+from app.security import SecurityValidator
 
 import structlog
 
@@ -26,6 +27,13 @@ async def process_endpoint(req: ProcessRequest, request: Request):
       3. Rehydrate (restore PII into response)
       4. Response scan (check for leaked PII in LLM output)
     """
+    # Validate input
+    try:
+        SecurityValidator.validate_prompt_length(req.prompt, request.app.state.settings.max_prompt_length)
+    except Exception as e:
+        logger.warning("invalid_prompt_input", error=str(e))
+        raise
+    
     pipeline = request.app.state.pipeline
     llm_router = request.app.state.llm_router
     rehydrator = request.app.state.rehydrator
@@ -82,9 +90,10 @@ async def process_endpoint(req: ProcessRequest, request: Request):
             model_requested=req.model_requested,
         )
     except Exception as e:
-        logger.error("llm_call_failed_in_process", error=str(e))
+        logger.error("llm_call_failed_in_process", error_type=type(e).__name__)
+        safe_error_msg = SecurityValidator.sanitize_error_message(e)
         return ProcessResponse(
-            response=f"[LLM ERROR] {str(e)}",
+            response=f"[LLM ERROR] {safe_error_msg}",
             blocked=False,
             pii_types_found=[d.pii_type.value for d in guard_result.pii_detections],
             ml_guard_score=guard_result.ml_guard_score,

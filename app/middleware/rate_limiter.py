@@ -4,6 +4,7 @@ rate_limiter.py
 Sliding window rate limiter middleware.
 Configurable per-IP limits via environment variables.
 Returns HTTP 429 with Retry-After header when exceeded.
+Validates X-Forwarded-For header to prevent spoofing.
 """
 
 import time
@@ -12,6 +13,8 @@ from collections import defaultdict
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+
+from app.security import SecurityValidator
 
 import structlog
 
@@ -34,7 +37,15 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         """Extract client IP, respecting X-Forwarded-For for proxied requests."""
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            # Take the first IP (closest to client)
+            client_ip = forwarded.split(",")[0].strip()
+            # Validate IP format to prevent injection
+            if SecurityValidator.validate_client_ip(client_ip):
+                return client_ip
+            else:
+                logger.warning("invalid_client_ip_format", ip=client_ip)
+                return "invalid"
+        
         return request.client.host if request.client else "unknown"
 
     def _is_allowed(self, key: str) -> tuple[bool, int]:
