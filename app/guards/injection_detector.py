@@ -88,7 +88,7 @@ class InjectionDetector:
                 padding=True,
             )
             ort_inputs = {
-                k: v for k, v in inputs.items() if k in self._input_names
+                k: v.astype(np.int64) for k, v in inputs.items() if k in self._input_names
             }
             logits = self._session.run(None, ort_inputs)[0]
             score = float(1 / (1 + np.exp(-logits[0][0])))  # sigmoid

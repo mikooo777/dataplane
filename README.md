@@ -86,6 +86,7 @@ The server is live at `http://localhost:8000`. Interactive docs at `http://local
 
 ### 5. Test
 
+**Linux / Mac (Bash):**
 ```bash
 # Health check
 curl http://localhost:8000/v1/health
@@ -102,6 +103,20 @@ curl -X POST http://localhost:8000/v1/process \
 
 # Run test suite
 pytest tests/ -v
+```
+
+**Windows (PowerShell):**
+```powershell
+# Health check
+Invoke-RestMethod http://localhost:8000/v1/health
+
+# Guard-only check
+$body = @{ "prompt" = "What is the capital of France?" } | ConvertTo-Json
+Invoke-RestMethod -Method POST http://localhost:8000/v1/guard -ContentType "application/json" -Body $body | ConvertTo-Json
+
+# Full pipeline (guard + LLM + rehydrate)
+$body = @{ "prompt" = "Send report to john@acme.com about Q3 sales" } | ConvertTo-Json
+Invoke-RestMethod -Method POST http://localhost:8000/v1/process -ContentType "application/json" -Body $body | ConvertTo-Json
 ```
 
 ---
