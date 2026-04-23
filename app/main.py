@@ -33,8 +33,10 @@ from app.engine.event_emitter import EventEmitter
 from app.middleware.request_id import RequestIDMiddleware
 from app.middleware.rate_limiter import RateLimiterMiddleware
 from app.middleware.access_log import AccessLogMiddleware
+from app.middleware.per_user_rate_limiter import create_user_rate_limiter
 from app.security import get_secure_headers
 from app.routes import guard, process, health, admin
+from app.routes import chat as chat_route
 
 
 # ── Structured Logging Configuration ─────────────────────────────────────────
@@ -106,6 +108,7 @@ async def lifespan(app: FastAPI):
     app.state.event_emitter = event_emitter
     app.state.settings = settings
     app.state.startup_time = time.time()
+    app.state.user_rate_limiter = create_user_rate_limiter(settings)
 
     # Start background telemetry flush loop
     flush_task = asyncio.create_task(event_emitter.start_flush_loop())
@@ -169,6 +172,7 @@ app.include_router(guard.router)
 app.include_router(process.router)
 app.include_router(health.router)
 app.include_router(admin.router)
+app.include_router(chat_route.router)   # NEW: multi-turn chat (Section 2.1)
 
 
 # ── Root Endpoint ────────────────────────────────────────────────────────────

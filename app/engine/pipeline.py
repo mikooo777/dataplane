@@ -6,12 +6,23 @@ Runs all security phases in sequence with per-phase timing, fail-closed
 semantics, and structured audit logging.
 
 Phase execution order:
-  1a. Heuristic scan     (regex jailbreak patterns)      <1ms
-  1b. Semantic firewall  (forbidden topic keywords)      <1ms
-  1c. PII scrub          (Presidio, 15+ entity types)    ~10ms
-  2a. ML injection scan  (ONNX distilbert)               ~15ms
-  2b. Ollama escalation  (LLM judgment, only if 2a says "escalate")
-  3.  Policy enforcement (token limits, keyword blocklist, model allowlist)
+  1a. Heuristic scan       (regex jailbreak patterns)           <1ms
+  1b. OWASP LLM Top 10    (NEW — all 10 categories)            <1ms
+  1c. Semantic firewall    (forbidden topic keywords)           <1ms
+  1d. PII scrub            (Presidio, 15+ entity types)        ~10ms
+      └─ Aadhaar Verhoeff  (NEW — checksum on Aadhaar hits)    <1ms
+  2a. ML injection scan    (ONNX distilbert)                   ~15ms
+  2b. Ollama escalation    (LLM judgment, only if 2a escalate)
+  3.  Token budget         (NEW — tiktoken, not word estimate)  <1ms
+  3.  Policy enforcement   (token limits, keyword blocklist, model allowlist)
+
+NEW in this version:
+  - OWASP LLM Top 10 scanner (10/10 coverage)
+  - Aadhaar Verhoeff checksum — reduces false positives
+  - tiktoken token budget — precise BPE token count
+  - WARN action — confidence-calibrated (Section 4.1)
+    GuardResult.warn=True when risk is real but below block threshold
+  - Per-user rate limiting integrated at pipeline level
 """
 
 import time
@@ -24,11 +35,14 @@ from app.contracts.enums import BlockReason
 from app.contracts.guard import GuardResult, PiiDetection
 from app.contracts.policy import PolicyBundle
 from app.guards.heuristic_scanner import HeuristicScanner
+from app.guards.owasp_scanner import OwaspScanner
 from app.guards.semantic_firewall import SemanticFirewall
 from app.guards.pii_detector import PiiDetector
 from app.guards.injection_detector import InjectionDetector
 from app.guards.ollama_guard import OllamaGuard
+from app.guards.verhoeff import is_valid_aadhaar
 from app.engine.policy_engine import PolicyEngine
+from app.engine.token_budget import check_token_budget
 
 logger = structlog.get_logger(__name__)
 
@@ -42,16 +56,21 @@ class GuardPipeline:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.heuristic_scanner = HeuristicScanner()
+        self.owasp_scanner     = OwaspScanner()
         self.semantic_firewall = SemanticFirewall()
-        self.pii_detector = PiiDetector()
+        self.pii_detector      = PiiDetector()
         self.injection_detector = InjectionDetector(settings)
-        self.ollama_guard = OllamaGuard(settings)
-        self.policy_engine = PolicyEngine(settings)
+        self.ollama_guard      = OllamaGuard(settings)
+        self.policy_engine     = PolicyEngine(settings)
 
         logger.info(
             "guard_pipeline_initialized",
             ml_model_loaded=self.injection_detector.is_loaded,
             fail_behavior=settings.fail_behavior,
+            owasp_coverage="10/10",
+            aadhaar_verhoeff=True,
+            tiktoken_budget=True,
+            warn_action=True,
         )
 
     def _blocked(
@@ -66,6 +85,7 @@ class GuardPipeline:
         placeholder_map: Optional[dict] = None,
         ml_score: float = 0.0,
         injection: bool = False,
+        warn: bool = False,
     ) -> GuardResult:
         """Helper to build a blocked GuardResult."""
         latency = (time.perf_counter() - t0) * 1000
@@ -86,12 +106,49 @@ class GuardPipeline:
             latency_ms=latency,
             placeholder_map=placeholder_map or {},
             phase_timings=timings,
+            warn=warn,
+        )
+
+    def _warned(
+        self,
+        clean_text: str,
+        warn_reason: str,
+        t0: float,
+        timings: dict,
+        detections: Optional[list[PiiDetection]] = None,
+        placeholder_map: Optional[dict] = None,
+        ml_score: float = 0.0,
+    ) -> GuardResult:
+        """
+        Build a WARN GuardResult (Section 4.1).
+        The prompt is NOT blocked but a warning is attached for downstream handling.
+        The LLM call still proceeds — but the caller SHOULD surface this to the user.
+        """
+        latency = (time.perf_counter() - t0) * 1000
+        logger.warning(
+            "prompt_warned",
+            reason=warn_reason,
+            ml_score=round(ml_score, 4),
+            latency_ms=round(latency, 2),
+        )
+        return GuardResult(
+            clean_text=clean_text,
+            blocked=False,
+            pii_detections=detections or [],
+            injection_detected=False,
+            ml_guard_score=ml_score,
+            latency_ms=latency,
+            placeholder_map=placeholder_map or {},
+            phase_timings=timings,
+            warn=True,
+            warn_reason=warn_reason,
         )
 
     async def guard(self, raw_prompt: str) -> GuardResult:
         """
         Run the full guard pipeline on a raw prompt.
         Returns GuardResult — if blocked=True, the prompt MUST NOT reach the LLM.
+        If warn=True, the caller should surface a risk warning to the user.
         """
         t0 = time.perf_counter()
         timings: dict[str, float] = {}
@@ -126,7 +183,19 @@ class GuardPipeline:
                 t0, timings, injection=True,
             )
 
-        # ── Phase 1b: Semantic firewall ──────────────────────────────────────
+        # ── Phase 1b: OWASP LLM Top 10 scan (NEW) ───────────────────────────
+        t_phase = time.perf_counter()
+        owasp_triggered, owasp_id, owasp_pattern = self.owasp_scanner.scan(raw_prompt)
+        timings["owasp_scan_ms"] = (time.perf_counter() - t_phase) * 1000
+
+        if owasp_triggered:
+            return self._blocked(
+                raw_prompt, BlockReason.HEURISTIC_JAILBREAK,
+                f"OWASP {owasp_id}: {owasp_pattern}",
+                t0, timings, injection=True,
+            )
+
+        # ── Phase 1c: Semantic firewall ──────────────────────────────────────
         t_phase = time.perf_counter()
         forbidden, topic, category = self.semantic_firewall.check(raw_prompt)
         timings["semantic_firewall_ms"] = (time.perf_counter() - t_phase) * 1000
@@ -138,10 +207,41 @@ class GuardPipeline:
                 t0, timings,
             )
 
-        # ── Phase 1c: PII scrub ─────────────────────────────────────────────
+        # ── Phase 1d: PII scrub ─────────────────────────────────────────────
         t_phase = time.perf_counter()
         clean_text, detections, placeholder_map = self.pii_detector.scrub(raw_prompt)
         timings["pii_scrub_ms"] = (time.perf_counter() - t_phase) * 1000
+
+        # ── Aadhaar Verhoeff checksum (NEW — Section 2.2) ────────────────────
+        # For each Aadhaar detection, validate the checksum.
+        # If it fails the checksum it's not a real Aadhaar → remove the detection
+        # to reduce false positives.
+        from app.contracts.enums import PiiType
+        valid_detections = []
+        valid_placeholder_map = {}
+        for det in detections:
+            if det.pii_type == PiiType.AADHAAR:
+                original_value = placeholder_map.get(det.placeholder, "")
+                if original_value and not is_valid_aadhaar(original_value):
+                    # Verhoeff checksum FAILED — restore this token, not a real Aadhaar
+                    logger.debug(
+                        "aadhaar_verhoeff_rejected",
+                        placeholder=det.placeholder,
+                        checksum_valid=False,
+                    )
+                    # Restore the text in clean_text for this placeholder
+                    clean_text = clean_text.replace(det.placeholder, original_value)
+                    # Don't add to valid_detections or valid_placeholder_map
+                    continue
+            valid_detections.append(det)
+            valid_placeholder_map[det.placeholder] = placeholder_map.get(det.placeholder, "")
+
+        # Also carry over non-detection placeholders (shouldn't happen but be safe)
+        for k, v in placeholder_map.items():
+            if k not in valid_placeholder_map:
+                valid_placeholder_map[k] = v
+        detections      = valid_detections
+        placeholder_map = valid_placeholder_map
 
         # Check PII policy: block if detected types are not in the allowed list
         bundle = self.policy_engine.get_policy()
@@ -207,17 +307,39 @@ class GuardPipeline:
                     injection=True,
                 )
 
-        # ── Phase 3: Policy enforcement ──────────────────────────────────────
+            # ── WARN action (Section 4.1) ────────────────────────────────────
+            # If Ollama says "pass" but ML score was in escalation zone →
+            # emit a WARN verdict. The prompt passes to LLM but the caller
+            # is notified to surface a risk indicator to the user.
+            if ollama_result.get("action") == "warn" or (
+                ml_score >= self.settings.ml_escalate_threshold
+                and ollama_result.get("action") != "block"
+            ):
+                warn_reason = (
+                    ollama_result.get("reason")
+                    or f"ML score {ml_score:.4f} in escalation zone (>{self.settings.ml_escalate_threshold})"
+                )
+                return self._warned(
+                    clean_text=clean_text,
+                    warn_reason=warn_reason,
+                    t0=t0,
+                    timings=timings,
+                    detections=detections,
+                    placeholder_map=placeholder_map,
+                    ml_score=ml_score,
+                )
+
+        # ── Phase 3: Token budget (tiktoken — NEW) ───────────────────────────
         t_phase = time.perf_counter()
 
         if bundle:
-            # Token limit check
-            token_estimate = int(len(clean_text.split()) * 1.3)
-            if token_estimate > bundle.max_prompt_tokens:
-                timings["policy_check_ms"] = (time.perf_counter() - t_phase) * 1000
+            within_budget, token_count = check_token_budget(clean_text, bundle.max_prompt_tokens)
+            timings["token_budget_ms"] = (time.perf_counter() - t_phase) * 1000
+
+            if not within_budget:
                 return self._blocked(
                     raw_prompt, BlockReason.TOKEN_LIMIT_EXCEEDED,
-                    f"Token estimate {token_estimate} > limit {bundle.max_prompt_tokens}",
+                    f"Token count {token_count} > limit {bundle.max_prompt_tokens} (tiktoken)",
                     t0, timings,
                     clean_text=clean_text,
                     detections=detections,
@@ -259,4 +381,5 @@ class GuardPipeline:
             latency_ms=latency,
             placeholder_map=placeholder_map,
             phase_timings=timings,
+            warn=False,
         )

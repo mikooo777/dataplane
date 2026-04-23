@@ -3,6 +3,9 @@ guard.py
 ========
 Data contracts for the guard pipeline output.
 GuardResult is the core output of the Foretyx security scan.
+
+Changes:
+  - Added warn + warn_reason fields (Guide Section 4.1 — WARN action)
 """
 
 from __future__ import annotations
@@ -64,6 +67,11 @@ class GuardResult(BaseModel):
     latency_ms:         float = Field(ge=0.0)
     placeholder_map:    dict[str, str] = Field(default_factory=dict)
     phase_timings:      dict[str, float] = Field(default_factory=dict)
+    # ── WARN action (Section 4.1) ────────────────────────────────────────────
+    # warn=True means the prompt passes but risk is elevated.
+    # Callers SHOULD surface a warning to the user/admin.
+    warn:               bool = False
+    warn_reason:        Optional[str] = None
 
     @model_validator(mode="after")
     def block_reason_required_when_blocked(self) -> GuardResult:

@@ -7,6 +7,9 @@ models/*.onnx.data
 models/*.bin
 models/*.pt
 
+# ── GGUF Models (too large for git, ~800MB) ───────────────────────────────────
+*.gguf
+
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
@@ -30,7 +33,7 @@ ENV/
 *.swo
 *~
 
-# ── Databases (local logs) ───────────────────────────────────────────────────
+# ── Databases (local runtime logs) ───────────────────────────────────────────
 *.db
 *.db-journal
 *.sqlite3
@@ -48,3 +51,6 @@ htmlcov/
 .coverage
 .pytest_cache/
 .tox/
+
+# ── Test result artifacts ────────────────────────────────────────────────────
+*_test_results*.json
