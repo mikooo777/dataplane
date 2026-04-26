@@ -176,24 +176,30 @@ class _NullEncryptedMap(EncryptedPlaceholderMap):
 
 class EncryptedRehydrator:
     """
-    Drop-in replacement for Rehydrator that accepts EncryptedPlaceholderMap.
+    Drop-in replacement for Rehydrator that accepts BOTH plain dicts
+    and EncryptedPlaceholderMap objects.
 
-    The pipeline creates an EncryptedPlaceholderMap after PII scrubbing.
-    The rehydrator decrypts it immediately before restoring values into the
-    LLM response.  The key and the map never leave the process.
+    The guard pipeline currently produces plain dict placeholder maps.
+    When the pipeline is upgraded to produce EncryptedPlaceholderMap,
+    this class handles decryption transparently. Until then, plain dicts
+    are processed directly — identical behavior to the original Rehydrator.
     """
 
     @staticmethod
     def restore(
         llm_response: str,
-        encrypted_map: EncryptedPlaceholderMap,
+        placeholder_map,
     ) -> str:
         """
-        Decrypt the map and restore PII into the LLM response.
+        Restore PII into the LLM response.
+
+        Accepts either:
+          - dict[str, str]              (plain placeholder map from pipeline)
+          - EncryptedPlaceholderMap      (encrypted map — decrypted before use)
 
         Args:
-            llm_response:  The LLM response (may contain placeholders)
-            encrypted_map: The encrypted placeholder map
+            llm_response:   The LLM response (may contain placeholders)
+            placeholder_map: Plain dict or EncryptedPlaceholderMap
 
         Returns:
             Response with all placeholders replaced by original values.
@@ -201,11 +207,23 @@ class EncryptedRehydrator:
         if not llm_response:
             return llm_response
 
-        try:
-            plaintext_map = encrypted_map.decrypt()
-        except Exception as e:
-            logger.error("rehydration_decrypt_failed", error=str(e))
-            return llm_response  # Fail safe — return without rehydration
+        # Resolve the map: decrypt if encrypted, use directly if plain dict
+        if isinstance(placeholder_map, dict):
+            plaintext_map = placeholder_map
+            is_encrypted = False
+        elif isinstance(placeholder_map, EncryptedPlaceholderMap):
+            try:
+                plaintext_map = placeholder_map.decrypt()
+                is_encrypted = placeholder_map.is_encrypted
+            except Exception as e:
+                logger.error("rehydration_decrypt_failed", error=str(e))
+                return llm_response  # Fail safe — return without rehydration
+        else:
+            logger.error(
+                "rehydration_invalid_map_type",
+                map_type=type(placeholder_map).__name__,
+            )
+            return llm_response
 
         if not plaintext_map:
             return llm_response
@@ -219,10 +237,10 @@ class EncryptedRehydrator:
 
         if restored > 0:
             logger.info(
-                "pii_rehydrated_encrypted",
+                "pii_rehydrated",
                 placeholders_restored=restored,
                 total_placeholders=len(plaintext_map),
-                map_encrypted=encrypted_map.is_encrypted,
+                encrypted=is_encrypted,
             )
 
         return result

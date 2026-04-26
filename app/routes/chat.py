@@ -18,7 +18,7 @@ from collections import defaultdict
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Header, HTTPException, Request, status
 
 from app.contracts.api import GuardRequest
 from app.contracts.enums import BlockReason, EventType
@@ -98,7 +98,8 @@ def _build_multi_turn_prompt(history: list[ChatMessage], new_user_message: str) 
     """
     parts = []
     for msg in history:
-        role = "User" if msg.role == "user" else "Assistant"
+        # Use dict access — history entries are stored as plain dicts (not Pydantic models)
+        role = "User" if msg["role"] == "user" else "Assistant"
         parts.append(f"{role}: {msg['content']}")
     parts.append(f"User: {new_user_message}")
     return "\n".join(parts)
@@ -110,13 +111,14 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     Multi-turn chat with full guard pipeline on every turn.
 
     Flow per turn:
-      1. Guard pipeline on the new user message
-      2. If blocked → return blocked response (session preserved for context)
-      3. Build multi-turn prompt from session history + new message
-      4. LLM call with full history context
-      5. Response scan
-      6. Rehydrate
-      7. Append both turns to session history
+      1. Per-user rate limit check (P0 fix — was created but never enforced)
+      2. Guard pipeline on the new user message
+      3. If blocked → return blocked response (session preserved for context)
+      4. Build multi-turn prompt from session history + new message
+      5. LLM call with full history context
+      6. Response scan
+      7. Rehydrate
+      8. Append both turns to session history
     """
     t0 = time.time()
 
@@ -129,6 +131,17 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     except Exception as e:
         logger.warning("chat_invalid_input", error=str(e))
         raise
+
+    # ── P0 Fix: Per-user rate limit enforcement ──────────────────────────────
+    user_rate_limiter = getattr(request.app.state, "user_rate_limiter", None)
+    if user_rate_limiter is not None:
+        allowed, retry_after = user_rate_limiter.check(req.org_id, req.user_id)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Per-user rate limit exceeded. Retry after {retry_after}s.",
+                headers={"Retry-After": str(retry_after)},
+            )
 
     # Prune expired sessions periodically
     _prune_expired_sessions()
@@ -157,7 +170,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     guard_result = await pipeline.guard(req.message)
 
     if guard_result.blocked:
-        event_emitter.queue_event(
+        await event_emitter.queue_event(
             guard_result=guard_result,
             model_requested=req.model_requested,
             model_allowed=False,
@@ -238,7 +251,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
         session["history"] = session["history"][-40:]
 
     # Emit telemetry
-    event_emitter.queue_event(
+    await event_emitter.queue_event(
         guard_result=guard_result,
         model_requested=req.model_requested,
         model_allowed=True,
@@ -278,8 +291,27 @@ async def end_chat_session(session_id: str):
 
 
 @router.get("/chat/{session_id}/history")
-async def get_chat_history(session_id: str):
-    """Return the conversation history for a session (clean text only, no PII)."""
+async def get_chat_history(
+    session_id: str,
+    authorization: Optional[str] = Header(None),
+    request: Request = None,
+):
+    """
+    Return the conversation history for a session (clean text only, no PII).
+    P1 Fix: Requires admin API key — history was previously unauthenticated.
+    """
+    # Validate admin API key (P1 security fix)
+    if request is not None:
+        from app.security import SecurityValidator
+        import hmac
+        api_key = SecurityValidator.validate_api_key(authorization)
+        admin_key = request.app.state.settings.admin_api_key.get_secret_value()
+        if not hmac.compare_digest(api_key.encode(), admin_key.encode()):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid API key",
+            )
+
     if session_id not in _SESSIONS:
         return {"session_id": session_id, "history": [], "turn_count": 0}
     session = _SESSIONS[session_id]

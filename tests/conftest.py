@@ -9,6 +9,7 @@ import pytest
 
 # Set test environment variables before any app imports
 os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
+os.environ.setdefault("ADMIN_API_KEY", "test-admin-key-not-real-must-be-32-chars-long")
 os.environ.setdefault("LOG_FORMAT", "console")
 os.environ.setdefault("LOG_LEVEL", "DEBUG")
 os.environ.setdefault("FAIL_BEHAVIOR", "CLOSED")

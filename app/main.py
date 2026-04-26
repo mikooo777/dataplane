@@ -27,7 +27,7 @@ from app.config import Settings
 from app.dependencies import get_settings
 from app.engine.pipeline import GuardPipeline
 from app.engine.llm_router import LLMRouter
-from app.engine.rehydrator import Rehydrator
+from app.engine.encrypted_rehydrator import EncryptedRehydrator  # P1 fix: was dead code
 from app.engine.response_scanner import ResponseScanner
 from app.engine.event_emitter import EventEmitter
 from app.middleware.request_id import RequestIDMiddleware
@@ -93,12 +93,23 @@ async def lifespan(app: FastAPI):
 
     logger.info("foretyx_data_plane_starting", version="2.0.0")
 
+    # P1 Fix: Validate bridge_token has a minimum length.
+    # An empty string was silently accepted, causing events to be queued
+    # but never flushed (no auth header sent to Control Plane).
+    bridge_token_val = settings.bridge_token.get_secret_value()
+    if not bridge_token_val or len(bridge_token_val) < 16:
+        logger.warning(
+            "bridge_token_too_short",
+            length=len(bridge_token_val),
+            recommendation="Set BRIDGE_TOKEN to a secure random value (>=16 chars) for Control Plane auth.",
+        )
+
     # Initialize components
-    pipeline = GuardPipeline(settings)
-    llm_router = LLMRouter(settings)
-    rehydrator = Rehydrator()
+    pipeline         = GuardPipeline(settings)
+    llm_router       = LLMRouter(settings)
+    rehydrator       = EncryptedRehydrator()   # P1 fix: was plain Rehydrator (dead code bypassed)
     response_scanner = ResponseScanner(pipeline.pii_detector)
-    event_emitter = EventEmitter(settings)
+    event_emitter    = EventEmitter(settings)
 
     # Store in app state for route handlers
     app.state.pipeline = pipeline

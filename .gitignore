@@ -54,3 +54,6 @@ htmlcov/
 
 # ── Test result artifacts ────────────────────────────────────────────────────
 *_test_results*.json
+
+# ── Review / audit documents (internal process artifacts) ────────────────────
+SHIPPPPP.*

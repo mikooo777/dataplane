@@ -133,6 +133,17 @@ class OllamaGuard:
                 })
 
             raw = resp.json().get("response", "")
+
+            # Critical Fix #1b: Validate response length before parsing.
+            # An empty or oversized response is structurally invalid — fail closed.
+            if not raw or len(raw.strip()) > 500:
+                self._circuit_breaker.record_failure()
+                logger.warning(
+                    "ollama_response_invalid_length",
+                    raw_length=len(raw) if raw else 0,
+                )
+                return {"action": "block", "reason": "ollama_response_invalid_length"}
+
             result = json.loads(raw.strip())
 
             if result.get("action") not in ("pass", "block"):
@@ -143,9 +154,11 @@ class OllamaGuard:
             return result
 
         except json.JSONDecodeError:
+            # Critical Fix #1: Fail CLOSED on non-JSON response.
+            # An attacker who forces a non-JSON response must NOT get a free pass.
             self._circuit_breaker.record_failure()
-            logger.warning("ollama_non_json_response", raw=raw[:200])
-            return {"action": "pass", "reason": "ollama_non_json_response"}
+            logger.warning("ollama_non_json_response_fail_closed", raw=raw[:200])
+            return {"action": "block", "reason": "ollama_non_json_response_fail_closed"}
 
         except httpx.TimeoutException:
             self._circuit_breaker.record_failure()

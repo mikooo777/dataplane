@@ -23,6 +23,7 @@ Reference: https://owasp.org/www-project-top-10-for-large-language-model-applica
 """
 
 import re
+import unicodedata
 from typing import Optional
 
 import structlog
@@ -125,11 +126,18 @@ class OwaspScanner:
         """
         Scan text for OWASP LLM Top 10 attack patterns.
 
+        P1 Fix: Apply Unicode NFC normalization before scanning.
+        This prevents homoglyph bypass attacks where attackers substitute
+        visually identical Unicode characters (e.g. Cyrillic 'а' for Latin 'a')
+        to evade regex pattern matching.
+
         Returns:
             (True, "LLM04", "pattern_name")  if a pattern matches
             (False, None, None)               if clean
         """
-        lowered = text.lower()
+        # NFC normalization: collapse homoglyphs to canonical form
+        normalized = unicodedata.normalize("NFC", text)
+        lowered = normalized.lower()
 
         for owasp_id, pattern_name, compiled in _COMPILED_OWASP:
             if compiled.search(lowered):

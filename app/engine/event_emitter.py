@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+import aiosqlite   # P2 fix: async SQLite to avoid blocking the event loop
 import httpx
 import structlog
 
@@ -76,8 +77,15 @@ class EventEmitter:
         self._init_db()
 
     def _init_db(self):
-        """Create the local event queue table with all indexes and columns."""
+        """Create the local event queue table with all indexes and columns.
+
+        P2 fix: Enable WAL mode for better concurrent read/write throughput.
+        The _init_db itself stays synchronous (called once at startup, not in the
+        async hot path).
+        """
         conn = sqlite3.connect(str(DB_PATH))
+        # WAL mode: readers don't block writers and vice versa
+        conn.execute("PRAGMA journal_mode=WAL;")
         conn.executescript("""
             -- Main outbound queue
             CREATE TABLE IF NOT EXISTS outbound_events (
@@ -106,9 +114,9 @@ class EventEmitter:
         """)
         conn.commit()
         conn.close()
-        logger.debug("event_emitter_db_initialized", path=str(DB_PATH))
+        logger.debug("event_emitter_db_initialized", path=str(DB_PATH), wal_mode=True)
 
-    def queue_event(
+    async def queue_event(
         self,
         guard_result: GuardResult,
         model_requested: str,
@@ -120,6 +128,9 @@ class EventEmitter:
         """
         Build a MetadataEvent from GuardResult and queue it locally.
         NEVER includes raw prompt, clean_text, PII values, or response text.
+
+        P2 fix: Made async and uses aiosqlite so the INSERT does not block
+        the uvicorn event loop.
         """
         event = MetadataEvent(
             org_id=org_id,
@@ -139,13 +150,12 @@ class EventEmitter:
         )
 
         now = datetime.now(timezone.utc).isoformat()
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.execute(
-            "INSERT INTO outbound_events (event_json, created_at) VALUES (?, ?)",
-            (event.model_dump_json(), now),
-        )
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            await conn.execute(
+                "INSERT INTO outbound_events (event_json, created_at) VALUES (?, ?)",
+                (event.model_dump_json(), now),
+            )
+            await conn.commit()
 
         logger.debug("event_queued", event_type=event_type.value, org_id=org_id)
 
@@ -154,18 +164,23 @@ class EventEmitter:
             asyncio.create_task(self.flush())
 
     async def flush(self):
-        """Flush queued events to the Control Plane. Retries on next cycle if failed."""
+        """Flush queued events to the Control Plane. Retries on next cycle if failed.
+
+        P2 fix: Uses aiosqlite for all DB reads/writes so this method
+        does not block the event loop while waiting for SQLite I/O.
+        """
         if not self._bridge_token:
             return
 
-        conn = sqlite3.connect(str(DB_PATH))
-        rows = conn.execute(
-            "SELECT id, event_json, retry_count FROM outbound_events "
-            f"WHERE sent=0 AND retry_count < {MAX_RETRY_COUNT} "
-            "ORDER BY created_at ASC LIMIT ?",
-            (BATCH_SIZE,),
-        ).fetchall()
-        conn.close()
+        async with aiosqlite.connect(str(DB_PATH)) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT id, event_json, retry_count FROM outbound_events "
+                f"WHERE sent=0 AND retry_count < {MAX_RETRY_COUNT} "
+                "ORDER BY created_at ASC LIMIT ?",
+                (BATCH_SIZE,),
+            )
+            rows = await cursor.fetchall()
 
         if not rows:
             return
@@ -185,14 +200,13 @@ class EventEmitter:
                 )
 
             if resp.status_code == 200:
-                conn = sqlite3.connect(str(DB_PATH))
-                placeholders = ",".join("?" * len(ids))
-                conn.execute(
-                    f"UPDATE outbound_events SET sent=1, updated_at=? WHERE id IN ({placeholders})",
-                    [now] + ids,
-                )
-                conn.commit()
-                conn.close()
+                async with aiosqlite.connect(str(DB_PATH)) as conn:
+                    placeholders = ",".join("?" * len(ids))
+                    await conn.execute(
+                        f"UPDATE outbound_events SET sent=1, updated_at=? WHERE id IN ({placeholders})",
+                        [now] + ids,
+                    )
+                    await conn.commit()
                 logger.info("events_flushed", count=len(ids))
             else:
                 self._record_retry_failures(ids, f"HTTP {resp.status_code}")

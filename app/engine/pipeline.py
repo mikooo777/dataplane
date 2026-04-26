@@ -219,6 +219,7 @@ class GuardPipeline:
         from app.contracts.enums import PiiType
         valid_detections = []
         valid_placeholder_map = {}
+        rejected_placeholders = set()   # Track Verhoeff-rejected placeholders
         for det in detections:
             if det.pii_type == PiiType.AADHAAR:
                 original_value = placeholder_map.get(det.placeholder, "")
@@ -231,14 +232,14 @@ class GuardPipeline:
                     )
                     # Restore the text in clean_text for this placeholder
                     clean_text = clean_text.replace(det.placeholder, original_value)
-                    # Don't add to valid_detections or valid_placeholder_map
+                    rejected_placeholders.add(det.placeholder)
                     continue
             valid_detections.append(det)
             valid_placeholder_map[det.placeholder] = placeholder_map.get(det.placeholder, "")
 
-        # Also carry over non-detection placeholders (shouldn't happen but be safe)
+        # Carry over non-detection placeholders, but NOT rejected ones
         for k, v in placeholder_map.items():
-            if k not in valid_placeholder_map:
+            if k not in valid_placeholder_map and k not in rejected_placeholders:
                 valid_placeholder_map[k] = v
         detections      = valid_detections
         placeholder_map = valid_placeholder_map

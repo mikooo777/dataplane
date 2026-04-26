@@ -9,6 +9,7 @@ DELETE /v1/rate-limit/{org_id}/{user_id} — Reset a user's rate limit (admin)
 GET /v1/owasp-coverage — OWASP LLM Top 10 coverage report (Section 3.3)
 """
 
+import hmac
 import json
 import sqlite3
 from pathlib import Path
@@ -28,10 +29,16 @@ EVENTS_DB = Path("foretyx_events.db")
 
 
 def _validate_admin(authorization: Optional[str], request: Request) -> str:
-    """Shared helper: validates admin API key."""
+    """Shared helper: validates admin API key.
+
+    P1 Fix: Uses hmac.compare_digest() instead of == to prevent timing attacks.
+    A naive == comparison leaks which bytes of the key are correct; constant-time
+    comparison closes that side channel.
+    """
     api_key = SecurityValidator.validate_api_key(authorization)
     admin_api_key = request.app.state.settings.admin_api_key.get_secret_value()
-    if api_key != admin_api_key:
+    # Constant-time comparison — eliminates timing oracle
+    if not hmac.compare_digest(api_key.encode(), admin_api_key.encode()):
         logger.warning(
             "unauthorized_admin_access",
             ip=request.client.host if request.client else "unknown",

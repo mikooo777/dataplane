@@ -110,8 +110,11 @@ class Settings(BaseSettings):
     port: int = Field(8000, ge=1, le=65535, description="Bind port")
 
     # ── Circuit breaker ──────────────────────────────────────────────────────
+    # Critical Fix #2: Threshold reduced from 5 → 3.
+    # At 30s timeouts, threshold=5 meant 150s of degraded security.
+    # threshold=3 caps max exposure at 90 seconds.
     circuit_breaker_threshold: int = Field(
-        5, ge=1, description="Consecutive Ollama failures before opening circuit"
+        3, ge=1, description="Consecutive Ollama failures before opening circuit"
     )
     circuit_breaker_recovery_seconds: int = Field(
         60, ge=10, description="Seconds to wait before retrying after circuit opens"

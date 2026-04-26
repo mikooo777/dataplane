@@ -29,6 +29,12 @@ python-dotenv==1.0.0
 # ── Structured logging ───────────────────────────────────────────────────────
 structlog>=24.0.0
 
+# ── Async SQLite (P2 fix: non-blocking event emitter) ────────────────────────
+aiosqlite>=0.20.0
+
+# ── Encryption (P1 fix: EncryptedRehydrator) ─────────────────────────────────
+cryptography>=42.0.0
+
 # ── Testing ──────────────────────────────────────────────────────────────────
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

@@ -5,7 +5,7 @@ POST /v1/process — Full end-to-end pipeline.
 Guard → LLM → Rehydrate → Response Scan → Return.
 """
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request, status
 
 from app.contracts.api import ProcessRequest, ProcessResponse
 from app.contracts.enums import BlockReason, EventType
@@ -33,6 +33,17 @@ async def process_endpoint(req: ProcessRequest, request: Request):
     except Exception as e:
         logger.warning("invalid_prompt_input", error=str(e))
         raise
+
+    # ── P0 Fix: Per-user rate limit enforcement ──────────────────────────────
+    user_rate_limiter = getattr(request.app.state, "user_rate_limiter", None)
+    if user_rate_limiter is not None:
+        allowed, retry_after = user_rate_limiter.check(req.org_id, req.user_id)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Per-user rate limit exceeded. Retry after {retry_after}s.",
+                headers={"Retry-After": str(retry_after)},
+            )
     
     pipeline = request.app.state.pipeline
     llm_router = request.app.state.llm_router
@@ -45,7 +56,7 @@ async def process_endpoint(req: ProcessRequest, request: Request):
 
     if guard_result.blocked:
         # Emit telemetry for blocked prompt
-        event_emitter.queue_event(
+        await event_emitter.queue_event(
             guard_result=guard_result,
             model_requested=req.model_requested,
             model_allowed=False,
@@ -113,7 +124,7 @@ async def process_endpoint(req: ProcessRequest, request: Request):
     final_response = rehydrator.restore(scanned_response, guard_result.placeholder_map)
 
     # ── Emit telemetry ───────────────────────────────────────────────────────
-    event_emitter.queue_event(
+    await event_emitter.queue_event(
         guard_result=guard_result,
         model_requested=req.model_requested,
         model_allowed=True,
