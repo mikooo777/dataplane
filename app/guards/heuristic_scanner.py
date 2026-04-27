@@ -119,11 +119,11 @@ class HeuristicScanner:
     @staticmethod
     def _normalize(text: str) -> str:
         """
-        Unicode NFC normalization — prevents homoglyph bypass attacks.
+        Unicode NFKC normalization — prevents homoglyph bypass attacks.
         e.g. Cyrillic 'а' (U+0430) looks identical to Latin 'a' (U+0061)
         but wouldn't match regex without normalization.
         """
-        return unicodedata.normalize("NFC", text)
+        return unicodedata.normalize("NFKC", text)
 
     def scan(self, text: str) -> Tuple[bool, Optional[str]]:
         """

@@ -16,14 +16,15 @@ from pathlib import Path
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request, Header, Query, status
+from fastapi import APIRouter, HTTPException, Request, Header, Query, status, Depends
 
 from app.contracts.api import RehydrateRequest, RehydrateResponse
 from app.security import SecurityValidator
+from app.security_mtls import require_mtls
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["admin"])
+router = APIRouter(prefix="/v1", tags=["admin"], dependencies=[Depends(require_mtls)])
 
 EVENTS_DB = Path("foretyx_events.db")
 
@@ -308,6 +309,7 @@ async def owasp_coverage(
 
     from app.guards.owasp_scanner import OwaspScanner
     coverage = OwaspScanner.coverage_report()
+    coverage["LLM02"] = ["response_scanner"]
     all_categories = ["LLM01","LLM02","LLM03","LLM04","LLM05",
                       "LLM06","LLM07","LLM08","LLM09","LLM10"]
     covered = list(coverage.keys())

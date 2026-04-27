@@ -86,7 +86,7 @@ class PerUserRateLimiter:
         current_count = len(self._windows[key])
 
         # Allow burst: first `burst` requests always go through immediately
-        if current_count >= self.max_rpm:
+        if current_count >= (self.max_rpm + self.burst):
             # Oldest request in window expires at oldest_ts + window_seconds
             oldest_ts = self._windows[key][0]
             retry_after = max(int(oldest_ts + self.window_seconds - now) + 1, 1)
