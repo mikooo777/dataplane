@@ -116,14 +116,20 @@ class HeuristicScanner:
     Returns the matched pattern name for audit trail visibility.
     """
 
+    _CONFUSABLES = str.maketrans({
+        'а': 'a', 'с': 'c', 'е': 'e', 'о': 'o', 'р': 'p', 'х': 'x', 'у': 'y', 'ï': 'i',
+        'А': 'a', 'С': 'c', 'Е': 'e', 'О': 'o', 'Р': 'p', 'Х': 'x', 'У': 'y', 'Ï': 'i'
+    })
+
     @staticmethod
     def _normalize(text: str) -> str:
         """
-        Unicode NFKC normalization — prevents homoglyph bypass attacks.
+        Unicode NFKC normalization + homoglyph unconfusing.
         e.g. Cyrillic 'а' (U+0430) looks identical to Latin 'a' (U+0061)
         but wouldn't match regex without normalization.
         """
-        return unicodedata.normalize("NFKC", text)
+        normalized = unicodedata.normalize("NFKC", text)
+        return normalized.translate(HeuristicScanner._CONFUSABLES)
 
     def scan(self, text: str) -> Tuple[bool, Optional[str]]:
         """

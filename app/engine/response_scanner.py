@@ -81,3 +81,8 @@ class ResponseScanner:
             return clean_response, pii_types_found, system_prompt_leaked
 
         return response_text, pii_types_found, system_prompt_leaked
+
+    @staticmethod
+    def coverage_report() -> dict:
+        """Return a summary of which OWASP categories are covered by post-scanning."""
+        return {"LLM02": ["response_scanner"]}

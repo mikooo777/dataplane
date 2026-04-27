@@ -308,8 +308,9 @@ async def owasp_coverage(
     _validate_admin(authorization, request)
 
     from app.guards.owasp_scanner import OwaspScanner
+    from app.engine.response_scanner import ResponseScanner
     coverage = OwaspScanner.coverage_report()
-    coverage["LLM02"] = ["response_scanner"]
+    coverage.update(ResponseScanner.coverage_report())
     all_categories = ["LLM01","LLM02","LLM03","LLM04","LLM05",
                       "LLM06","LLM07","LLM08","LLM09","LLM10"]
     covered = list(coverage.keys())

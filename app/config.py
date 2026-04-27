@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     require_https: bool = Field(
         False, description="Require HTTPS in production (set via env var)"
     )
+    require_mtls: bool = Field(
+        False, description="Require mTLS client certificate validation"
+    )
     cors_allow_credentials: bool = Field(
         False, description="Allow credentials in CORS (should be False for public APIs)"
     )

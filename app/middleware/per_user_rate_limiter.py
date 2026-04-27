@@ -34,7 +34,7 @@ DEFAULT_BURST = 5
 
 class PerUserRateLimiter:
     """
-    Sliding-window rate limiter keyed by (org_id, user_id).
+    Token bucket rate limiter keyed by (org_id, user_id) for true burst handling.
 
     Usage:
         limiter = PerUserRateLimiter(max_rpm=20, burst=5)
@@ -52,8 +52,10 @@ class PerUserRateLimiter:
         self.max_rpm        = max_rpm
         self.burst          = burst
         self.window_seconds = window_seconds
-        # {(org_id, user_id): [timestamps]}
-        self._windows: dict[tuple, list[float]] = defaultdict(list)
+        # Tokens added per second
+        self.rate           = max_rpm / window_seconds
+        # {(org_id, user_id): (tokens_left, last_update_ts)}
+        self._buckets: dict[tuple, tuple[float, float]] = {}
 
     def check(
         self,
@@ -63,74 +65,65 @@ class PerUserRateLimiter:
     ) -> tuple[bool, int]:
         """
         Check if the (org_id, user_id) pair is within the rate limit.
-
-        Args:
-            org_id:  Organisation identifier
-            user_id: User identifier
-            cost:    Request cost (default 1; streaming might be higher)
-
-        Returns:
-            (allowed, retry_after_seconds)
-            - allowed: True if request should proceed
-            - retry_after_seconds: 0 if allowed, otherwise seconds to wait
         """
         key = (org_id, user_id)
         now = time.time()
-        window_start = now - self.window_seconds
 
-        # Prune expired timestamps
-        self._windows[key] = [
-            t for t in self._windows[key] if t > window_start
-        ]
+        if key not in self._buckets:
+            tokens = float(self.burst)
+        else:
+            prev_tokens, prev_ts = self._buckets[key]
+            elapsed = now - prev_ts
+            tokens = min(float(self.burst), prev_tokens + elapsed * self.rate)
 
-        current_count = len(self._windows[key])
-
-        # Allow burst: first `burst` requests always go through immediately
-        if current_count >= (self.max_rpm + self.burst):
-            # Oldest request in window expires at oldest_ts + window_seconds
-            oldest_ts = self._windows[key][0]
-            retry_after = max(int(oldest_ts + self.window_seconds - now) + 1, 1)
-            logger.warning(
-                "per_user_rate_limited",
+        if tokens >= cost:
+            self._buckets[key] = (tokens - cost, now)
+            logger.debug(
+                "per_user_rate_check_passed",
                 org_id=org_id,
                 user_id=user_id,
-                count=current_count,
+                tokens_left=round(tokens - cost, 2),
                 limit=self.max_rpm,
-                retry_after=retry_after,
             )
-            return False, retry_after
+            return True, 0
 
-        # Record the request
-        for _ in range(cost):
-            self._windows[key].append(now)
-
-        logger.debug(
-            "per_user_rate_check_passed",
+        # Not enough tokens
+        needed = cost - tokens
+        retry_after = max(int(needed / self.rate) + 1, 1)
+        logger.warning(
+            "per_user_rate_limited",
             org_id=org_id,
             user_id=user_id,
-            count=current_count + cost,
+            tokens_left=round(tokens, 2),
             limit=self.max_rpm,
+            retry_after=retry_after,
         )
-        return True, 0
+        return False, retry_after
 
     def reset(self, org_id: str, user_id: str):
         """Reset the rate limit window for a specific user (admin use)."""
         key = (org_id, user_id)
-        if key in self._windows:
-            del self._windows[key]
+        if key in self._buckets:
+            del self._buckets[key]
             logger.info("per_user_rate_limit_reset", org_id=org_id, user_id=user_id)
 
     def get_stats(self, org_id: str, user_id: str) -> dict:
         """Return rate limit stats for a user (admin endpoint use)."""
         key = (org_id, user_id)
         now = time.time()
-        window_start = now - self.window_seconds
-        current = [t for t in self._windows.get(key, []) if t > window_start]
+        
+        if key not in self._buckets:
+            tokens = float(self.burst)
+        else:
+            prev_tokens, prev_ts = self._buckets[key]
+            elapsed = now - prev_ts
+            tokens = min(float(self.burst), prev_tokens + elapsed * self.rate)
+
         return {
             "org_id":        org_id,
             "user_id":       user_id,
-            "requests_used": len(current),
-            "requests_left": max(0, self.max_rpm - len(current)),
+            "requests_used": round(self.burst - tokens, 2),
+            "requests_left": round(tokens, 2),
             "max_rpm":       self.max_rpm,
             "window_seconds": self.window_seconds,
         }
@@ -138,15 +131,15 @@ class PerUserRateLimiter:
     def get_all_stats(self) -> list[dict]:
         """Return stats for all tracked users."""
         now = time.time()
-        window_start = now - self.window_seconds
         results = []
-        for (org_id, user_id), timestamps in self._windows.items():
-            current = [t for t in timestamps if t > window_start]
+        for (org_id, user_id), (prev_tokens, prev_ts) in self._buckets.items():
+            elapsed = now - prev_ts
+            tokens = min(float(self.burst), prev_tokens + elapsed * self.rate)
             results.append({
                 "org_id":        org_id,
                 "user_id":       user_id,
-                "requests_used": len(current),
-                "requests_left": max(0, self.max_rpm - len(current)),
+                "requests_used": round(self.burst - tokens, 2),
+                "requests_left": round(tokens, 2),
             })
         return results
 
