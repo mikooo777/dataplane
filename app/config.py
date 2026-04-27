@@ -125,6 +125,18 @@ class Settings(BaseSettings):
         50000, ge=100, description="Maximum raw prompt character length"
     )
 
+    # ── Consensus verdict ────────────────────────────────────────────────────
+    # When deterministic scripts and Ollama disagree (scripts=block, Ollama=safe),
+    # this controls the final action: "review" (pass with warning) or "block".
+    consensus_disagreement_action: str = Field(
+        "review", description="Action on script/Ollama disagreement: 'review' or 'block'"
+    )
+    # If True, Ollama Guard runs for every request (consensus mode).
+    # If False, Ollama only runs on ML escalation (legacy mode).
+    consensus_ollama_always: bool = Field(
+        True, description="Always run Ollama Guard for consensus verdicting"
+    )
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]

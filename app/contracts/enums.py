@@ -52,6 +52,9 @@ class BlockReason(str, Enum):
     PROMPT_TOO_LONG      = "prompt_too_long"
     RATE_LIMITED          = "rate_limited"
     RESPONSE_PII_LEAK    = "response_pii_leak"
+    # ── Consensus verdict reasons ────────────────────────────────────────
+    CONSENSUS_BLOCK      = "consensus_block"       # Both scripts + Ollama agree unsafe
+    CONSENSUS_OLLAMA_OVERRIDE = "consensus_ollama_override"  # Ollama overrides scripts-safe
 
 
 class EventType(str, Enum):

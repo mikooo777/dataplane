@@ -65,8 +65,17 @@ async def process_endpoint(req: ProcessRequest, request: Request):
             event_type=EventType.GUARD_BLOCKED,
         )
 
+        # Production-grade response messaging
+        reason = guard_result.block_reason
+        if reason and reason.value == "pii_detected":
+            response_msg = "Sensitive data detected. Request blocked per strict protection policy."
+        elif reason and reason.value in ("consensus_block", "consensus_ollama_override"):
+            response_msg = f"Request blocked by security consensus. {guard_result.block_detail or ''}"
+        else:
+            response_msg = f"Request blocked: {guard_result.block_detail or reason.value if reason else 'security policy'}"
+
         return ProcessResponse(
-            response=f"[BLOCKED] {guard_result.block_reason.value if guard_result.block_reason else 'unknown'}: {guard_result.block_detail or ''}",
+            response=response_msg,
             blocked=True,
             block_reason=guard_result.block_reason,
             block_detail=guard_result.block_detail,

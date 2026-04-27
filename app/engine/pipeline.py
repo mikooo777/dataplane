@@ -5,26 +5,35 @@ The Foretyx Guard Pipeline — master orchestrator.
 Runs all security phases in sequence with per-phase timing, fail-closed
 semantics, and structured audit logging.
 
+v3.0 — Consensus-First Verdict Architecture:
+  - Deterministic guards collect verdicts (no early return on security flags)
+  - Ollama Guard runs for EVERY request (parallel with ML guard)
+  - Final verdict uses consensus matrix with Ollama priority
+  - Graceful fallback to scripts-only when Ollama is unavailable
+
+Consensus Decision Matrix:
+  | Scripts | Ollama  | Final                           |
+  |---------|---------|----------------------------------|
+  | Safe    | Safe    | Pass                             |
+  | Unsafe  | Unsafe  | Block (consensus)                |
+  | Safe    | Unsafe  | Block (Ollama overrides)         |
+  | Unsafe  | Safe    | Review or Block (configurable)   |
+
 Phase execution order:
   1a. Heuristic scan       (regex jailbreak patterns)           <1ms
-  1b. OWASP LLM Top 10    (NEW — all 10 categories)            <1ms
+  1b. OWASP LLM Top 10    (all 10 categories)                  <1ms
   1c. Semantic firewall    (forbidden topic keywords)           <1ms
-  1d. PII scrub            (Presidio, 15+ entity types)        ~10ms
-      └─ Aadhaar Verhoeff  (NEW — checksum on Aadhaar hits)    <1ms
-  2a. ML injection scan    (ONNX distilbert)                   ~15ms
-  2b. Ollama escalation    (LLM judgment, only if 2a escalate)
-  3.  Token budget         (NEW — tiktoken, not word estimate)  <1ms
-  3.  Policy enforcement   (token limits, keyword blocklist, model allowlist)
-
-NEW in this version:
-  - OWASP LLM Top 10 scanner (10/10 coverage)
-  - Aadhaar Verhoeff checksum — reduces false positives
-  - tiktoken token budget — precise BPE token count
-  - WARN action — confidence-calibrated (Section 4.1)
-    GuardResult.warn=True when risk is real but below block threshold
-  - Per-user rate limiting integrated at pipeline level
+  1d. PII scrub            (Presidio, 22+ entity types)        ~10ms
+      └─ Aadhaar Verhoeff  (checksum on Aadhaar hits)          <1ms
+  2a. ML injection scan    (ONNX distilbert)                   ~15ms  ┐
+  2b. Ollama consensus     (LLM judgment, ALWAYS runs)         ~500ms ┘ parallel
+  3.  Consensus verdict    (matrix decision)
+  4.  PII policy           (block or scrub per policy)
+  5.  Token budget         (tiktoken, <1ms)
+  6.  Policy enforcement   (keyword blocklist, model allowlist)
 """
 
+import asyncio
 import time
 from typing import Optional
 
@@ -51,6 +60,8 @@ class GuardPipeline:
     """
     Stateless guard pipeline. Initialized once at startup, called per-request.
     Every phase fails-closed: if a guard errors, the prompt is blocked.
+
+    v3.0: Consensus-first verdict with Ollama priority.
     """
 
     def __init__(self, settings: Settings):
@@ -70,8 +81,11 @@ class GuardPipeline:
             owasp_coverage="10/10",
             aadhaar_verhoeff=True,
             tiktoken_budget=True,
-            warn_action=True,
+            consensus_mode=settings.consensus_ollama_always,
+            consensus_disagreement=settings.consensus_disagreement_action,
         )
+
+    # ── Result Builders ──────────────────────────────────────────────────────
 
     def _blocked(
         self,
@@ -120,9 +134,8 @@ class GuardPipeline:
         ml_score: float = 0.0,
     ) -> GuardResult:
         """
-        Build a WARN GuardResult (Section 4.1).
+        Build a WARN/REVIEW GuardResult.
         The prompt is NOT blocked but a warning is attached for downstream handling.
-        The LLM call still proceeds — but the caller SHOULD surface this to the user.
         """
         latency = (time.perf_counter() - t0) * 1000
         logger.warning(
@@ -144,11 +157,116 @@ class GuardPipeline:
             warn_reason=warn_reason,
         )
 
+    # ── Consensus Logic ──────────────────────────────────────────────────────
+
+    def _consensus_verdict(
+        self,
+        security_flags: list[dict],
+        ollama_result: dict,
+        ml_score: float,
+    ) -> dict:
+        """
+        Apply the consensus decision matrix.
+
+        Returns:
+            {"action": "pass"|"block"|"review",
+             "reason": BlockReason or None,
+             "detail": str,
+             "injection": bool}
+        """
+        scripts_block = len(security_flags) > 0
+        ollama_available = ollama_result.get("available", False)
+        ollama_block = ollama_result.get("action") == "block"
+        ollama_reason = ollama_result.get("reason", "")
+
+        # ── Ollama unavailable: fall back to scripts-only ────────────────
+        if not ollama_available:
+            if scripts_block:
+                flag = security_flags[0]
+                return {
+                    "action": "block",
+                    "reason": flag["reason"],
+                    "detail": f"{flag['detail']} [consensus: scripts-only, Ollama unavailable]",
+                    "injection": flag.get("injection", False),
+                }
+            logger.debug("consensus_scripts_only_pass", ollama_status="unavailable")
+            return {"action": "pass", "reason": None, "detail": "", "injection": False}
+
+        # ── Both safe → Pass ─────────────────────────────────────────────
+        if not scripts_block and not ollama_block:
+            logger.info("consensus_pass", scripts="safe", ollama="safe")
+            return {"action": "pass", "reason": None, "detail": "", "injection": False}
+
+        # ── Both unsafe → Block (consensus agreement) ────────────────────
+        if scripts_block and ollama_block:
+            flag = security_flags[0]
+            detail = (
+                f"{flag['detail']} | Ollama: {ollama_reason} "
+                f"[consensus: both agree block]"
+            )
+            logger.warning(
+                "consensus_block_agreement",
+                script_guard=flag.get("guard"),
+                ollama_reason=ollama_reason,
+            )
+            return {
+                "action": "block",
+                "reason": BlockReason.CONSENSUS_BLOCK,
+                "detail": detail,
+                "injection": flag.get("injection", False),
+            }
+
+        # ── Scripts safe, Ollama unsafe → Block (Ollama overrides) ───────
+        if not scripts_block and ollama_block:
+            detail = (
+                f"Ollama guard override: {ollama_reason} "
+                f"[consensus: Ollama vetoed scripts-safe, ML score {ml_score:.4f}]"
+            )
+            logger.warning(
+                "consensus_ollama_override",
+                ollama_reason=ollama_reason,
+                ml_score=round(ml_score, 4),
+            )
+            return {
+                "action": "block",
+                "reason": BlockReason.CONSENSUS_OLLAMA_OVERRIDE,
+                "detail": detail,
+                "injection": True,
+            }
+
+        # ── Scripts unsafe, Ollama safe → Review or Block (configurable) ─
+        flag = security_flags[0]
+        action = self.settings.consensus_disagreement_action
+        detail = (
+            f"{flag['detail']} | Ollama: safe "
+            f"[consensus: disagreement -> {action}]"
+        )
+        logger.warning(
+            "consensus_disagreement",
+            script_guard=flag.get("guard"),
+            script_reason=flag["detail"],
+            ollama_action="pass",
+            configured_action=action,
+        )
+        return {
+            "action": action,  # "review" or "block"
+            "reason": flag["reason"],
+            "detail": detail,
+            "injection": flag.get("injection", False),
+        }
+
+    # ── Main Guard Method ────────────────────────────────────────────────────
+
     async def guard(self, raw_prompt: str) -> GuardResult:
         """
         Run the full guard pipeline on a raw prompt.
-        Returns GuardResult — if blocked=True, the prompt MUST NOT reach the LLM.
-        If warn=True, the caller should surface a risk warning to the user.
+
+        v3.0 Consensus flow:
+          1. Collect all deterministic guard verdicts
+          2. Run Ollama + ML in parallel
+          3. Apply consensus matrix
+          4. Apply policy checks (PII, token budget, keywords)
+          5. Return final verdict
         """
         t0 = time.perf_counter()
         timings: dict[str, float] = {}
@@ -157,7 +275,7 @@ class GuardPipeline:
         placeholder_map: dict[str, str] = {}
         ml_score = 0.0
 
-        # ── Input validation ─────────────────────────────────────────────────
+        # ── Input validation (structural — not security verdicts) ─────────
         if not raw_prompt or not raw_prompt.strip():
             return self._blocked(
                 raw_prompt, BlockReason.POLICY_VIOLATION,
@@ -171,80 +289,168 @@ class GuardPipeline:
                 t0, timings,
             )
 
-        # ── Phase 1a: Heuristic jailbreak scan ──────────────────────────────
+        # ══════════════════════════════════════════════════════════════════
+        # SECURITY PHASE: Collect all guard verdicts (no early returns)
+        # ══════════════════════════════════════════════════════════════════
+        security_flags: list[dict] = []
+
+        # ── Phase 1a: Heuristic jailbreak scan ───────────────────────────
         t_phase = time.perf_counter()
         jailbreak_detected, pattern_name = self.heuristic_scanner.scan(raw_prompt)
         timings["heuristic_scan_ms"] = (time.perf_counter() - t_phase) * 1000
 
         if jailbreak_detected:
-            return self._blocked(
-                raw_prompt, BlockReason.HEURISTIC_JAILBREAK,
-                f"Jailbreak pattern: {pattern_name}",
-                t0, timings, injection=True,
-            )
+            security_flags.append({
+                "guard": "heuristic_scanner",
+                "reason": BlockReason.HEURISTIC_JAILBREAK,
+                "detail": f"Jailbreak pattern: {pattern_name}",
+                "injection": True,
+            })
 
-        # ── Phase 1b: OWASP LLM Top 10 scan (NEW) ───────────────────────────
+        # ── Phase 1b: OWASP LLM Top 10 scan ─────────────────────────────
         t_phase = time.perf_counter()
         owasp_triggered, owasp_id, owasp_pattern = self.owasp_scanner.scan(raw_prompt)
         timings["owasp_scan_ms"] = (time.perf_counter() - t_phase) * 1000
 
         if owasp_triggered:
-            return self._blocked(
-                raw_prompt, BlockReason.HEURISTIC_JAILBREAK,
-                f"OWASP {owasp_id}: {owasp_pattern}",
-                t0, timings, injection=True,
-            )
+            security_flags.append({
+                "guard": "owasp_scanner",
+                "reason": BlockReason.HEURISTIC_JAILBREAK,
+                "detail": f"OWASP {owasp_id}: {owasp_pattern}",
+                "injection": True,
+            })
 
-        # ── Phase 1c: Semantic firewall ──────────────────────────────────────
+        # ── Phase 1c: Semantic firewall ──────────────────────────────────
         t_phase = time.perf_counter()
         forbidden, topic, category = self.semantic_firewall.check(raw_prompt)
         timings["semantic_firewall_ms"] = (time.perf_counter() - t_phase) * 1000
 
         if forbidden:
-            return self._blocked(
-                raw_prompt, BlockReason.FORBIDDEN_TOPIC,
-                f"Forbidden topic: '{topic}' (category: {category})",
-                t0, timings,
-            )
+            security_flags.append({
+                "guard": "semantic_firewall",
+                "reason": BlockReason.FORBIDDEN_TOPIC,
+                "detail": f"Forbidden topic: '{topic}' (category: {category})",
+                "injection": False,
+            })
 
-        # ── Phase 1d: PII scrub ─────────────────────────────────────────────
+        # ── Phase 1d: PII scrub (always runs — modifies text) ────────────
         t_phase = time.perf_counter()
         clean_text, detections, placeholder_map = self.pii_detector.scrub(raw_prompt)
         timings["pii_scrub_ms"] = (time.perf_counter() - t_phase) * 1000
 
-        # ── Aadhaar Verhoeff checksum (NEW — Section 2.2) ────────────────────
-        # For each Aadhaar detection, validate the checksum.
-        # If it fails the checksum it's not a real Aadhaar → remove the detection
-        # to reduce false positives.
+        # ── Aadhaar Verhoeff checksum validation ─────────────────────────
         from app.contracts.enums import PiiType
         valid_detections = []
         valid_placeholder_map = {}
-        rejected_placeholders = set()   # Track Verhoeff-rejected placeholders
+        rejected_placeholders = set()
         for det in detections:
             if det.pii_type == PiiType.AADHAAR:
                 original_value = placeholder_map.get(det.placeholder, "")
                 if original_value and not is_valid_aadhaar(original_value):
-                    # Verhoeff checksum FAILED — restore this token, not a real Aadhaar
                     logger.debug(
                         "aadhaar_verhoeff_rejected",
                         placeholder=det.placeholder,
                         checksum_valid=False,
                     )
-                    # Restore the text in clean_text for this placeholder
                     clean_text = clean_text.replace(det.placeholder, original_value)
                     rejected_placeholders.add(det.placeholder)
                     continue
             valid_detections.append(det)
             valid_placeholder_map[det.placeholder] = placeholder_map.get(det.placeholder, "")
 
-        # Carry over non-detection placeholders, but NOT rejected ones
         for k, v in placeholder_map.items():
             if k not in valid_placeholder_map and k not in rejected_placeholders:
                 valid_placeholder_map[k] = v
         detections      = valid_detections
         placeholder_map = valid_placeholder_map
 
-        # Check PII policy: block if detected types are not in the allowed list
+        # ══════════════════════════════════════════════════════════════════
+        # PARALLEL PHASE: ML Guard + Ollama Guard
+        # ══════════════════════════════════════════════════════════════════
+        t_phase = time.perf_counter()
+
+        if self.settings.consensus_ollama_always:
+            # Run ML and Ollama in parallel for minimum latency
+            ml_coro = asyncio.to_thread(self.injection_detector.scan, raw_prompt)
+            ollama_coro = self.ollama_guard.scan(clean_text)
+            (ml_verdict, ml_score), ollama_result = await asyncio.gather(
+                ml_coro, ollama_coro
+            )
+        else:
+            # Legacy mode: ML first, Ollama only on escalation
+            ml_verdict, ml_score = self.injection_detector.scan(raw_prompt)
+            ollama_result = {"action": "pass", "available": False}
+
+        timings["ml_guard_ms"] = (time.perf_counter() - t_phase) * 1000
+
+        # Collect ML verdict into security flags
+        if ml_verdict == "error":
+            if self.settings.fail_behavior == "CLOSED":
+                security_flags.append({
+                    "guard": "ml_guard",
+                    "reason": BlockReason.ML_GUARD_TRIGGERED,
+                    "detail": "ML guard unavailable — fail-closed",
+                    "injection": True,
+                })
+        elif ml_verdict == "block":
+            security_flags.append({
+                "guard": "ml_guard",
+                "reason": BlockReason.ML_GUARD_TRIGGERED,
+                "detail": f"ML guard score {ml_score:.4f} >= block threshold {self.settings.ml_block_threshold}",
+                "injection": True,
+            })
+
+        # Legacy escalation mode (only if consensus_ollama_always is False)
+        if not self.settings.consensus_ollama_always and ml_verdict == "escalate":
+            t_esc = time.perf_counter()
+            ollama_result = await self.ollama_guard.scan(clean_text)
+            timings["ollama_escalation_ms"] = (time.perf_counter() - t_esc) * 1000
+
+        # ══════════════════════════════════════════════════════════════════
+        # CONSENSUS PHASE: Apply decision matrix
+        # ══════════════════════════════════════════════════════════════════
+        t_phase = time.perf_counter()
+        consensus = self._consensus_verdict(security_flags, ollama_result, ml_score)
+        timings["consensus_ms"] = (time.perf_counter() - t_phase) * 1000
+
+        logger.info(
+            "consensus_result",
+            action=consensus["action"],
+            script_flags=len(security_flags),
+            ollama_available=ollama_result.get("available", False),
+            ollama_action=ollama_result.get("action"),
+            ml_score=round(ml_score, 4),
+        )
+
+        if consensus["action"] == "block":
+            return self._blocked(
+                raw_prompt, consensus["reason"],
+                consensus["detail"],
+                t0, timings,
+                clean_text=clean_text,
+                detections=detections,
+                placeholder_map=placeholder_map,
+                ml_score=ml_score,
+                injection=consensus.get("injection", False),
+            )
+
+        if consensus["action"] == "review":
+            return self._warned(
+                clean_text=clean_text,
+                warn_reason=f"Consensus review: {consensus['detail']}",
+                t0=t0,
+                timings=timings,
+                detections=detections,
+                placeholder_map=placeholder_map,
+                ml_score=ml_score,
+            )
+
+        # ══════════════════════════════════════════════════════════════════
+        # POLICY PHASE: PII, token budget, keyword blocklist
+        # (Only reached when security consensus is "pass")
+        # ══════════════════════════════════════════════════════════════════
+
+        # ── PII policy check ─────────────────────────────────────────────
         bundle = self.policy_engine.get_policy()
         if detections and bundle and bundle.pii_rules.block_on_detect:
             allowed = set(bundle.pii_rules.allowed_pii_types)
@@ -253,86 +459,17 @@ class GuardPipeline:
             if blocked_types:
                 return self._blocked(
                     raw_prompt, BlockReason.PII_DETECTED,
-                    f"Blocked PII types: {[t.value for t in blocked_types]}",
-                    t0, timings,
-                    clean_text=clean_text,
-                    detections=detections,
-                    placeholder_map=placeholder_map,
-                )
-
-        # ── Phase 2a: ML injection scan (ONNX) ──────────────────────────────
-        t_phase = time.perf_counter()
-        verdict, ml_score = self.injection_detector.scan(raw_prompt)
-        timings["ml_guard_ms"] = (time.perf_counter() - t_phase) * 1000
-
-        if verdict == "error":
-            # ML model failed — fail-closed
-            if self.settings.fail_behavior == "CLOSED":
-                return self._blocked(
-                    raw_prompt, BlockReason.ML_GUARD_TRIGGERED,
-                    "ML guard unavailable — fail-closed",
-                    t0, timings,
-                    clean_text=clean_text,
-                    detections=detections,
-                    placeholder_map=placeholder_map,
-                    injection=True,
-                )
-
-        if verdict == "block":
-            return self._blocked(
-                raw_prompt, BlockReason.ML_GUARD_TRIGGERED,
-                f"ML guard score {ml_score:.4f} >= block threshold {self.settings.ml_block_threshold}",
-                t0, timings,
-                clean_text=clean_text,
-                detections=detections,
-                placeholder_map=placeholder_map,
-                ml_score=ml_score,
-                injection=True,
-            )
-
-        # ── Phase 2b: Ollama escalation (ambiguous cases only) ───────────────
-        if verdict == "escalate":
-            t_phase = time.perf_counter()
-            ollama_result = await self.ollama_guard.scan(clean_text)
-            timings["ollama_escalation_ms"] = (time.perf_counter() - t_phase) * 1000
-
-            if ollama_result.get("action") == "block":
-                return self._blocked(
-                    raw_prompt, BlockReason.ML_GUARD_TRIGGERED,
-                    f"Ollama escalation blocked: {ollama_result.get('reason', 'N/A')}",
+                    f"Sensitive data detected. Request blocked per strict protection policy. "
+                    f"Types: {[t.value for t in blocked_types]}",
                     t0, timings,
                     clean_text=clean_text,
                     detections=detections,
                     placeholder_map=placeholder_map,
                     ml_score=ml_score,
-                    injection=True,
                 )
 
-            # ── WARN action (Section 4.1) ────────────────────────────────────
-            # If Ollama says "pass" but ML score was in escalation zone →
-            # emit a WARN verdict. The prompt passes to LLM but the caller
-            # is notified to surface a risk indicator to the user.
-            if ollama_result.get("action") == "warn" or (
-                ml_score >= self.settings.ml_escalate_threshold
-                and ollama_result.get("action") != "block"
-            ):
-                warn_reason = (
-                    ollama_result.get("reason")
-                    or f"ML score {ml_score:.4f} in escalation zone (>{self.settings.ml_escalate_threshold})"
-                )
-                return self._warned(
-                    clean_text=clean_text,
-                    warn_reason=warn_reason,
-                    t0=t0,
-                    timings=timings,
-                    detections=detections,
-                    placeholder_map=placeholder_map,
-                    ml_score=ml_score,
-                )
-
-        # ── Phase 3: Token budget (tiktoken — NEW) ───────────────────────────
+        # ── Token budget ─────────────────────────────────────────────────
         t_phase = time.perf_counter()
-
         if bundle:
             within_budget, token_count = check_token_budget(clean_text, bundle.max_prompt_tokens)
             timings["token_budget_ms"] = (time.perf_counter() - t_phase) * 1000
@@ -364,13 +501,23 @@ class GuardPipeline:
 
         timings["policy_check_ms"] = (time.perf_counter() - t_phase) * 1000
 
-        # ── PASS — prompt is safe ────────────────────────────────────────────
+        # ── PASS — prompt is safe ────────────────────────────────────────
         latency = (time.perf_counter() - t0) * 1000
+
+        # Log sanitization info if PII was scrubbed (not blocked)
+        if detections:
+            logger.info(
+                "pii_sanitized_and_passed",
+                pii_count=len(detections),
+                types=[d.pii_type.value for d in detections],
+            )
+
         logger.info(
             "prompt_passed",
             pii_count=len(detections),
             ml_score=round(ml_score, 4),
             latency_ms=round(latency, 2),
+            consensus="pass",
         )
 
         return GuardResult(

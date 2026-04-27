@@ -119,7 +119,7 @@ class OllamaGuard:
         # Circuit breaker check
         if not self._circuit_breaker.can_execute():
             logger.warning("ollama_circuit_open_fail_closed")
-            return {"action": "block", "reason": "ollama_circuit_breaker_open"}
+            return {"action": "block", "reason": "ollama_circuit_breaker_open", "available": False}
 
         raw = ""
         try:
@@ -142,7 +142,7 @@ class OllamaGuard:
                     "ollama_response_invalid_length",
                     raw_length=len(raw) if raw else 0,
                 )
-                return {"action": "block", "reason": "ollama_response_invalid_length"}
+                return {"action": "block", "reason": "ollama_response_invalid_length", "available": False}
 
             result = json.loads(raw.strip())
 
@@ -151,6 +151,7 @@ class OllamaGuard:
 
             self._circuit_breaker.record_success()
             logger.info("ollama_guard_result", action=result["action"])
+            result["available"] = True
             return result
 
         except json.JSONDecodeError:
@@ -158,19 +159,19 @@ class OllamaGuard:
             # An attacker who forces a non-JSON response must NOT get a free pass.
             self._circuit_breaker.record_failure()
             logger.warning("ollama_non_json_response_fail_closed", raw=raw[:200])
-            return {"action": "block", "reason": "ollama_non_json_response_fail_closed"}
+            return {"action": "block", "reason": "ollama_non_json_response_fail_closed", "available": False}
 
         except httpx.TimeoutException:
             self._circuit_breaker.record_failure()
             logger.warning("ollama_timeout", timeout_s=self._timeout)
-            return {"action": "block", "reason": "ollama_timeout_fail_closed"}
+            return {"action": "block", "reason": "ollama_timeout_fail_closed", "available": False}
 
         except httpx.ConnectError:
             self._circuit_breaker.record_failure()
             logger.warning("ollama_unreachable")
-            return {"action": "block", "reason": "ollama_unreachable_fail_closed"}
+            return {"action": "block", "reason": "ollama_unreachable_fail_closed", "available": False}
 
         except Exception as e:
             self._circuit_breaker.record_failure()
             logger.error("ollama_error", error=str(e))
-            return {"action": "block", "reason": f"ollama_error_fail_closed: {type(e).__name__}"}
+            return {"action": "block", "reason": f"ollama_error_fail_closed: {type(e).__name__}", "available": False}

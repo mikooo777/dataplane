@@ -189,13 +189,16 @@ class EventEmitter:
         events       = [json.loads(r[1]) for r in rows]
         retry_counts = {r[0]: r[2] for r in rows}
 
+        # Flatten nested MetadataEvent → flat SingleEvent for the Control Plane
+        flat_events = [self._to_cp_format(e) for e in events]
+
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     f"{self._control_plane_url}/events",
-                    json={"events": events},
+                    json={"events": flat_events},
                     headers={"Authorization": f"Bearer {self._bridge_token}"},
                 )
 
@@ -219,6 +222,63 @@ class EventEmitter:
         except Exception as e:
             self._record_retry_failures(ids, str(e))
             logger.warning("event_flush_error", error=str(e), count=len(ids))
+    @staticmethod
+    def _to_cp_format(event: dict) -> dict:
+        """
+        Flatten a nested DP MetadataEvent dict into the flat SingleEvent
+        format the Control Plane's POST /events endpoint expects.
+
+        DP format (nested):
+            {event_id, org_id, user_id, event_type, device: {device_id, ...},
+             guard: {pii_types_detected, ...}, request: {model_requested, ...}}
+
+        CP format (flat):
+            {event_id, org_id, user_id, device_id, action,
+             pii_types_detected, ml_guard_score, model_requested, ...}
+        """
+        device  = event.get("device", {})
+        guard   = event.get("guard", {})
+        request = event.get("request", {})
+
+        # Map event_type → action (CP expects PASSED/BLOCKED)
+        event_type = event.get("event_type", "")
+        if event_type == "guard_blocked":
+            action = "BLOCKED"
+        elif event_type in ("prompt_sent", "response_received"):
+            action = "PASSED"
+        else:
+            action = event_type.upper() if event_type else "UNKNOWN"
+
+        block_reason = request.get("block_reason")
+        if isinstance(block_reason, dict):
+            block_reason = block_reason.get("value", str(block_reason))
+
+        # Convert PiiType enums to plain strings
+        pii_types = guard.get("pii_types_detected", [])
+        pii_types_str = [
+            (t.get("value") if isinstance(t, dict) else str(t))
+            for t in pii_types
+        ] if pii_types else []
+
+        return {
+            "event_id":              str(event.get("event_id", "")),
+            "org_id":                event.get("org_id", ""),
+            "user_id":               event.get("user_id", ""),
+            "device_id":             str(device.get("device_id", "")),
+            "app_version":           device.get("app_version"),
+            "session_id":            str(event.get("session_id", "")) if event.get("session_id") else None,
+            "action":                action,
+            "block_reason":          str(block_reason) if block_reason else None,
+            "pii_types_detected":    pii_types_str,
+            "pii_count":             guard.get("pii_count", 0),
+            "injection_detected":    guard.get("injection_detected", False),
+            "ml_guard_score":        guard.get("ml_guard_score", 0.0),
+            "guard_latency_ms":      guard.get("latency_ms", 0.0),
+            "model_requested":       request.get("model_requested"),
+            "model_allowed":         request.get("model_allowed"),
+            "prompt_token_estimate": request.get("prompt_token_estimate"),
+            "timestamp":             event.get("timestamp"),
+        }
 
     def _record_retry_failures(self, ids: list[int], error: str):
         """Increment retry counter; move to dead-letter if max retries exceeded."""

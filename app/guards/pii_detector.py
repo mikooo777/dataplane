@@ -33,6 +33,7 @@ from presidio_analyzer.predefined_recognizers import (
     IpRecognizer,
     IbanRecognizer,
     UsSsnRecognizer,
+    SpacyRecognizer,
 )
 
 from app.contracts.enums import PiiType
@@ -164,6 +165,7 @@ class DateOfBirthRecognizer(PatternRecognizer):
             supported_entity="DATE_OF_BIRTH",
             patterns=[
                 Pattern("DOB_SLASH", r"\b(0?[1-9]|[12][0-9]|3[01])[\/\-](0?[1-9]|1[012])[\/\-](19|20)\d\d\b", 0.7),
+                Pattern("DOB_ISO",   r"\b(19|20)\d\d[\/\-](0?[1-9]|1[012])[\/\-](0?[1-9]|[12][0-9]|3[01])\b", 0.75),
                 Pattern("DOB_TEXT",  r"(?i)(born|dob|date of birth|birth date)[\s:]+\w+\s+\d{1,2},?\s+\d{4}", 0.8),
             ],
             context=["born", "dob", "date of birth", "birth", "age"],
@@ -190,14 +192,17 @@ class PiiDetector:
 
         # Build custom registry with all recognizers
         registry = RecognizerRegistry()
+        
+        # Explicitly add standard recognizers
+        registry.add_recognizer(EmailRecognizer())
+        registry.add_recognizer(PhoneRecognizer())
+        registry.add_recognizer(CreditCardRecognizer())
+        registry.add_recognizer(IpRecognizer())
+        registry.add_recognizer(IbanRecognizer())
+        registry.add_recognizer(UsSsnRecognizer())
+        registry.add_recognizer(SpacyRecognizer()) # Handles Person, Location, etc.
+
         for recognizer in [
-            # Global (Presidio built-ins)
-            EmailRecognizer(),
-            PhoneRecognizer(),
-            CreditCardRecognizer(),
-            IpRecognizer(),
-            IbanRecognizer(),
-            UsSsnRecognizer(),
             # India-specific
             AadhaarRecognizer(),
             PanRecognizer(),

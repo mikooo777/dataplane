@@ -49,6 +49,9 @@ class PolicyEngine:
                 blocked_keywords=[],
                 max_prompt_tokens=4000,
             )
+            # Default PII rules: scrub-and-pass (not blanket block)
+            self._cached_policy.pii_rules.block_on_detect = False
+            self._cached_policy.pii_rules.scrub_before_send = True
             # Write it so future loads succeed
             try:
                 POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
