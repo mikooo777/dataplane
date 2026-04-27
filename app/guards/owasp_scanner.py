@@ -121,12 +121,17 @@ class OwaspScanner:
              (False, None, None)
     """
 
+    _CONFUSABLES = str.maketrans({
+        'а': 'a', 'с': 'c', 'е': 'e', 'о': 'o', 'р': 'p', 'х': 'x', 'у': 'y', 'ï': 'i',
+        'А': 'a', 'С': 'c', 'Е': 'e', 'О': 'o', 'Р': 'p', 'Х': 'x', 'У': 'y', 'Ï': 'i'
+    })
+
     @staticmethod
     def scan(text: str) -> tuple[bool, Optional[str], Optional[str]]:
         """
         Scan text for OWASP LLM Top 10 attack patterns.
 
-        P1 Fix: Apply Unicode NFC normalization before scanning.
+        P1 Fix: Apply Unicode NFKC normalization before scanning.
         This prevents homoglyph bypass attacks where attackers substitute
         visually identical Unicode characters (e.g. Cyrillic 'а' for Latin 'a')
         to evade regex pattern matching.
@@ -135,8 +140,8 @@ class OwaspScanner:
             (True, "LLM04", "pattern_name")  if a pattern matches
             (False, None, None)               if clean
         """
-        # NFC normalization: collapse homoglyphs to canonical form
-        normalized = unicodedata.normalize("NFC", text)
+        # NFKC normalization + homoglyphs unconfusing
+        normalized = unicodedata.normalize("NFKC", text).translate(OwaspScanner._CONFUSABLES)
         lowered = normalized.lower()
 
         for owasp_id, pattern_name, compiled in _COMPILED_OWASP:

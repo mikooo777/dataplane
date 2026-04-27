@@ -256,6 +256,11 @@ class SemanticFirewall:
 
         return False
 
+    _CONFUSABLES = str.maketrans({
+        'а': 'a', 'с': 'c', 'е': 'e', 'о': 'o', 'р': 'p', 'х': 'x', 'у': 'y', 'ï': 'i',
+        'А': 'a', 'С': 'c', 'Е': 'e', 'О': 'o', 'Р': 'p', 'Х': 'x', 'У': 'y', 'Ï': 'i'
+    })
+
     def check(self, text: str) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Check if text references a forbidden topic with dangerous intent.
@@ -264,7 +269,7 @@ class SemanticFirewall:
             (True, "topic", "category")  if forbidden topic found with intent
             (False, None, None)          if clean
         """
-        normalized = unicodedata.normalize("NFC", text.lower())
+        normalized = unicodedata.normalize("NFKC", text).translate(self._CONFUSABLES).lower()
 
         # Phase 1: Always-block topics (ultra-specific, no context needed)
         for topic, category in self._always_block:
